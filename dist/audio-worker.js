@@ -1,7 +1,7 @@
 import {analyze,stretchAudio,alignPhase,mixAudio,encodeWav,encodeMp3} from './audio-engine.js';
 let original=null,sampleRate=44100,cache=null;
 self.onmessage=({data})=>{const {id,type}=data;const progress=(value,label)=>self.postMessage({id,type:'progress',value,label});try{
-  if(type==='load'){original=data.channels;sampleRate=data.sampleRate;cache=null;const analysis=analyze(original,sampleRate,p=>progress(p*100,'正在识别歌曲节奏'));self.postMessage({id,type:'analyzed',analysis});}
+  if(type==='load'){original=data.channels;sampleRate=data.sampleRate;cache=null;const analysis=data.analyze===false?null:analyze(original,sampleRate,p=>progress(p*100,'正在识别歌曲节奏'));self.postMessage({id,type:'analyzed',analysis});}
   if(type==='generate'){
     if(!original)throw new Error('请先选择歌曲。');
     const {target,sourceBpm,volume}=data;if(!Number.isFinite(sourceBpm)||sourceBpm<40||sourceBpm>260)throw new Error('原曲 BPM 请输入 40 到 260 之间的数字。');
@@ -12,3 +12,4 @@ self.onmessage=({data})=>{const {id,type}=data;const progress=(value,label)=>sel
     self.postMessage({id,type:'generated',wav,mp3,duration:cache.music[0].length/sampleRate,target,volume,sourceBpm,clickCount:mixed.indices.length},[wav,mp3]);
   }
 }catch(error){self.postMessage({id,type:'error',message:error.message||'处理失败，请重新选择歌曲。'});}};
+self.postMessage({type:'ready'});
