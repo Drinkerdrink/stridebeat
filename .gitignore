@@ -1,0 +1,11 @@
+node_modules/
+test-output/
+__pycache__/
+*.pyc
+.env
+.env.*
+.openai/
+.sites-runtime/
+*.log
+.DS_Store
+Thumbs.db

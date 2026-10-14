@@ -1,0 +1,3 @@
+import {ContinuousMp3Encoder} from './merge-engine.js';
+let encoder;
+self.onmessage=({data})=>{const {id,type}=data;try{if(type==='start'){encoder=new ContinuousMp3Encoder();self.postMessage({id,type:'started'});}if(type==='track'){if(!encoder)throw new Error('请先开始合并。');encoder.addSilence(data.gapBefore??0);encoder.addWav(data.wav,p=>self.postMessage({id,type:'progress',value:p}));self.postMessage({id,type:'track-done'});}if(type==='finish'){if(!encoder)throw new Error('合并未开始。');const mp3=encoder.finish();encoder=null;self.postMessage({id,type:'finished',mp3},[mp3]);}}catch(error){encoder=null;self.postMessage({id,type:'error',message:error.message});}};

@@ -1,0 +1,16 @@
+{
+  "name": "stridebeat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "踏频跑步音乐工坊，独立分享版",
+  "scripts": {
+    "start": "node server.mjs --open",
+    "test": "node tests/audio.test.mjs && node tests/merge.test.mjs && node tests/file-output.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Drinkerdrink/stridebeat.git"
+  },
+  "homepage": "https://github.com/Drinkerdrink/stridebeat#readme"
+}
