@@ -8,45 +8,73 @@ export function fft(real, imag) {
   for(let len=2;len<=n;len<<=1){const angle=-TAU/len, wr=Math.cos(angle),wi=Math.sin(angle);for(let i=0;i<n;i+=len){let ur=1,ui=0;for(let j=0;j<len/2;j++){const a=i+j,b=a+len/2,vr=real[b]*ur-imag[b]*ui,vi=real[b]*ui+imag[b]*ur;real[b]=real[a]-vr;imag[b]=imag[a]-vi;real[a]+=vr;imag[a]+=vi;const next=ur*wr-ui*wi;ui=ur*wi+ui*wr;ur=next;}}}
 }
 function quantile(values, p){const sorted=Array.from(values).sort((a,b)=>a-b);return sorted[Math.floor((sorted.length-1)*p)]||1e-8;}
+function movingMean(values, radius){
+  const sums=new Float64Array(values.length+1),out=new Float32Array(values.length);
+  for(let i=0;i<values.length;i++)sums[i+1]=sums[i]+values[i];
+  for(let i=0;i<values.length;i++){const a=Math.max(0,i-radius),b=Math.min(values.length,i+radius+1);out[i]=(sums[b]-sums[a])/(b-a);}
+  return out;
+}
+function localOnsets(values){
+  const mean=movingMean(values,86),floor=.1*quantile(values,.95)+1e-9;
+  const relative=Float32Array.from(values,(x,i)=>x/(mean[i]+floor)),baseline=movingMean(relative,21);
+  return Float32Array.from(relative,(x,i)=>Math.max(0,x-baseline[i]));
+}
+function pickOnsets(env,fs,hop,duration){
+  const candidates=[];
+  for(let i=1;i<env.length-1;i++)if(env[i]>env[i-1]&&env[i]>=env[i+1]&&env[i]>.32)candidates.push(i);
+  candidates.sort((a,b)=>env[b]-env[a]);
+  const blocked=new Uint8Array(env.length),chosen=[],radius=Math.floor(.16*fs/hop);
+  for(const i of candidates){if(blocked[i])continue;chosen.push(i);blocked.fill(1,Math.max(0,i-radius),Math.min(env.length,i+radius+1));}
+  chosen.sort((a,b)=>a-b);
+  const trim=duration>30?5:.5;
+  return chosen.filter(i=>i*hop/fs>=trim&&i*hop/fs<duration-trim).map(i=>({t:i*hop/fs,w:Math.min(env[i],8)}));
+}
 export function onsetPeaks(channels, sr, progress=()=>{}) {
   const ratio=4, fs=sr/ratio, n=1024, hop=128;
   const mono=new Float32Array(Math.floor(channels[0].length/ratio));
   let rms=0;
   for(let i=0;i<mono.length;i++){let v=0;for(let c=0;c<channels.length;c++)for(let k=0;k<ratio;k++)v+=channels[c][i*ratio+k]||0;mono[i]=v/(ratio*channels.length);rms+=mono[i]*mono[i];}
   if(Math.sqrt(rms/mono.length)<1e-5)throw new Error('这段音频接近静音，无法识别节拍。请换一首有清晰节奏的歌曲。');
-  const count=Math.ceil(mono.length/hop), broad=new Float32Array(count),bass=new Float32Array(count),re=new Float64Array(n),im=new Float64Array(n),prev=new Float32Array(n/2),win=Float32Array.from({length:n},(_,i)=>.5-.5*Math.cos(TAU*i/n));
+  const count=Math.ceil(mono.length/hop), broad=new Float32Array(count),bass=new Float32Array(count),mid=new Float32Array(count),re=new Float64Array(n),im=new Float64Array(n),prev=new Float32Array(n/2),win=Float32Array.from({length:n},(_,i)=>.5-.5*Math.cos(TAU*i/n));
   for(let frame=0;frame<count;frame++){
     const start=frame*hop-n/2;
     for(let j=0;j<n;j++){re[j]=(mono[start+j]||0)*win[j];im[j]=0;}
     fft(re,im);
-    for(let k=4;k<n/2;k++){const mag=Math.log1p(Math.hypot(re[k],im[k])*200/n),diff=Math.max(0,mag-prev[k]);broad[frame]+=diff;if(k*fs/n<=150)bass[frame]+=diff;prev[k]=mag;}
+    for(let k=4;k<n/2;k++){const mag=Math.log1p(Math.hypot(re[k],im[k])*200/n),diff=Math.max(0,mag-prev[k]),hz=k*fs/n;broad[frame]+=diff;if(hz<=150)bass[frame]+=diff;else if(hz<=2000)mid[frame]+=diff;prev[k]=mag;}
     if(frame%2000===0)progress(frame/count);
   }
   const bn=quantile(broad,.95),ln=quantile(bass,.95),env=Float32Array.from(broad,(x,i)=>ln>1e-5?bass[i]/ln+.08*x/bn:x/bn);
-  const candidates=[];
-  for(let i=1;i<count-1;i++)if(env[i]>env[i-1]&&env[i]>=env[i+1]&&env[i]>.32)candidates.push(i);
-  candidates.sort((a,b)=>env[b]-env[a]);
-  const blocked=new Uint8Array(count),chosen=[],radius=Math.floor(.16*fs/hop);
-  for(const i of candidates){if(blocked[i])continue;chosen.push(i);blocked.fill(1,Math.max(0,i-radius),Math.min(count,i+radius+1));}
-  chosen.sort((a,b)=>a-b);
-  const dur=channels[0].length/sr,trim=dur>30?5:.5;
-  const points=chosen.filter(i=>i*hop/fs>=trim&&i*hop/fs<dur-trim).map(i=>({t:i*hop/fs,w:Math.min(env[i],8)}));
-  if(points.length<6)throw new Error('这段音乐的节奏太短或不够清晰。请使用至少 8 秒、有明显鼓点的歌曲。');
-  return {points,duration:dur};
+  const dur=channels[0].length/sr,points=pickOnsets(env,fs,hop,dur);
+  // Bass is a useful anchor, but syncopated bass can imply unrelated tempos.
+  // Independently track midrange percussion and broadband attacks as well.
+  const bands=[{name:'bass',weight:1,points},{name:'mid',weight:.92,points:pickOnsets(localOnsets(mid),fs,hop,dur)},{name:'broad',weight:.85,points:pickOnsets(localOnsets(broad),fs,hop,dur)}].filter(b=>b.points.length>=6);
+  if(!bands.length)throw new Error('这段音乐的节奏太短或不够清晰。请使用至少 8 秒、有明显鼓点的歌曲。');
+  return {points,bands,duration:dur};
 }
-function projection(points,bpm){let re=0,im=0,sum=0;const freq=TAU*bpm/60;for(const p of points){re+=p.w*Math.cos(p.t*freq);im+=p.w*Math.sin(p.t*freq);sum+=p.w;}return {score:Math.hypot(re,im)/sum,phase:((Math.atan2(im,re)/freq)%(60/bpm)+60/bpm)%(60/bpm)};}
+function projection(points,bpm){let re=0,im=0,sum=0;const freq=TAU*bpm/60;for(const p of points){re+=p.w*Math.cos(p.t*freq);im+=p.w*Math.sin(p.t*freq);sum+=p.w;}return {score:sum?Math.hypot(re,im)/sum:0,phase:((Math.atan2(im,re)/freq)%(60/bpm)+60/bpm)%(60/bpm)};}
+function tempoEvidence(bands,bpm){
+  const evidence=bands.map(b=>({...projection(b.points,bpm),band:b,weight:b.weight})).sort((a,b)=>b.score*b.weight-a.score*a.weight),best=evidence[0];
+  return {bpm,score:best.score,phase:best.phase,band:best.band,bassScore:evidence.find(e=>e.band.name==='bass')?.score||0,quality:best.score*best.weight+.08*(evidence[1]?.score||0)};
+}
 export function analyze(channels,sr,progress=()=>{}){
   const data=onsetPeaks(channels,sr,p=>progress(p*.45)), peaks=[];
-  for(let bpm=65;bpm<=210;bpm+=.04){peaks.push({bpm,...projection(data.points,bpm)});if(peaks.length%100===0)progress(.45+.5*(bpm-65)/145);}
-  peaks.sort((a,b)=>b.score-a.score);let best=peaks[0];
-  const half=peaks.find(p=>Math.abs(p.bpm-best.bpm/2)<.15&&p.score>best.score*.88);
+  for(let i=0;i<=3625;i++){const bpm=65+i*.04;peaks.push(tempoEvidence(data.bands,bpm));if(i%100===0)progress(.45+.5*i/3625);}
+  peaks.sort((a,b)=>b.quality-a.quality);let best=peaks[0];
+  // A coherent kick pulse anchors the beat even when higher instruments carry
+  // a faster ostinato. Only use percussion fallback when bass is inconclusive.
+  const bassAnchor=peaks.reduce((a,b)=>b.bassScore>a.bassScore?b:a);
+  if(bassAnchor.bassScore>=.65&&bassAnchor.bpm>65.08&&bassAnchor.bpm<209.92)best=bassAnchor;
+  const half=peaks.find(p=>Math.abs(p.bpm-best.bpm/2)<.15&&p.quality>best.quality*.88);
   if(half)best=half;
   const center=best.bpm;
-  for(let b=center-.07;b<=center+.07;b+=.0005){const p=projection(data.points,b);if(p.score>best.score)best={bpm:b,...p};}
+  for(let b=Math.max(65,center-.07);b<=Math.min(210,center+.07);b+=.0005){const p=tempoEvidence(data.bands,b);if(p.quality>best.quality)best=p;}
   const period=60/best.bpm, offsets=[];
-  for(let start=5;start<data.duration-15;start+=20){const pts=data.points.filter(p=>p.t>=start&&p.t<start+20);if(pts.length<5)continue;const p=projection(pts,best.bpm);let diff=p.phase-best.phase;diff-=Math.round(diff/period)*period;offsets.push(diff);}
+  for(let start=5;start<data.duration-15;start+=20){const pts=best.band.points.filter(p=>p.t>=start&&p.t<start+20);if(pts.length<5)continue;const p=projection(pts,best.bpm);if(p.score<.18)continue;let diff=p.phase-best.phase;diff-=Math.round(diff/period)*period;offsets.push(diff);}
   const drift=offsets.length?Math.max(...offsets)-Math.min(...offsets):0;
-  progress(1);return {...best,drift,stable:best.score>=.18&&drift<.09};
+  const rival=peaks.find(p=>Math.abs(p.bpm-best.bpm)>1&&Math.abs(p.bpm-best.bpm/2)>1&&Math.abs(p.bpm-best.bpm*2)>1);
+  const ambiguous=!!rival&&rival.quality>best.quality*.85,atBoundary=best.bpm<=65.08||best.bpm>=209.92;
+  const alternatives=[best.bpm/2,best.bpm*2].filter(b=>b>=40&&b<=260).map(b=>({bpm:Number(b.toFixed(2)),kind:b<best.bpm?'半拍':'倍拍'}));
+  progress(1);return {bpm:best.bpm,score:best.score,phase:best.phase,band:best.band.name,drift,ambiguous,atBoundary,alternatives,stable:best.score>=.35&&drift<.09&&!ambiguous&&!atBoundary};
 }
 export function stretchAudio(channels,sr,rate,progress=()=>{}){
   if(!Number.isFinite(rate)||rate<.25||rate>5.25)throw new Error('变速比例超出范围，请检查原曲 BPM。');
@@ -61,10 +89,11 @@ export function stretchAudio(channels,sr,rate,progress=()=>{}){
   if(offset<outLength-1024)throw new Error('音频变速未能完整完成，请重新选择歌曲后重试。');
   progress(1);return out;
 }
-export function alignPhase(channels,sr,bpm){const {points}=onsetPeaks(channels,sr);return projection(points,bpm).phase;}
+export function alignPhase(channels,sr,bpm){const {bands}=onsetPeaks(channels,sr);return tempoEvidence(bands,bpm).phase;}
 export function tickSamples(sr){const tick=new Float32Array(Math.round(sr*.032));let peak=0;for(let i=0;i<tick.length;i++){const t=i/sr;tick[i]=(1-Math.exp(-t/.00025))*Math.exp(-t/.006)*(Math.sin(TAU*1550*t)+.35*Math.sin(TAU*2470*t))*Math.min(1,(tick.length-1-i)/(sr*.004));peak=Math.max(peak,Math.abs(tick[i]));}for(let i=0;i<tick.length;i++)tick[i]/=peak;return tick;}
+export function clickPreviewGain(volume){const gain=Math.max(0,Math.min(300,volume))*.55/100;return gain*Math.min(1,.86/(.76+gain));}
 export function mixAudio(channels,sr,bpm,volume,phase){
-  if(!Number.isInteger(bpm)||bpm<160||bpm>210||!Number.isFinite(volume)||volume<0||volume>100)throw new Error('步频或点声音量无效。');
+  if(!Number.isInteger(bpm)||bpm<160||bpm>210||!Number.isFinite(volume)||volume<0||volume>300)throw new Error('步频或点声音量无效。');
   const length=channels[0].length,out=channels.map(c=>new Float32Array(c)),tick=tickSamples(sr),indices=[];let peak=0;
   for(const c of out)for(const x of c)peak=Math.max(peak,Math.abs(x));
   const musicGain=peak>.76?.76/peak:1;
